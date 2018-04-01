@@ -399,6 +399,7 @@ namespace SGF.Network.KCP
         }
 
 		//收到act包之后需要删除发送换从区中与ack包中的 发送序列号 sn 相同的kcp包。
+		//队列里面，从开透视遍历，小于sn的segment, fastack 都会被加一，因为你收到后面的包了，但是前面的包还没收到ack回应、 这个值用于快速重传。
         void parse_ack(UInt32 sn)
         {
 
@@ -608,7 +609,9 @@ namespace SGF.Network.KCP
 
                 offset += (int)length;
             }
-
+			//这里死慢启动机制。cwnd 随着数据不断的发送成功，cwnd窗口会不断的变大，
+			//对应的incr(可以发送的最大数据量)也在不断的变大。直至饱和。
+			//当这个增加到达ssthresh 的时候增加就会减慢,腾出流量给其他用户。
             if (_itimediff(snd_una, s_una) > 0)
             {
                 if (cwnd < rmt_wnd)
@@ -775,8 +778,8 @@ namespace SGF.Network.KCP
                     segment.rto = rx_rto;
                     segment.resendts = current_ + segment.rto + rtomin;
                 }
-                else if (_itimediff(current_, segment.resendts) >= 0) //已经发送过的segment 这里是重传
-                {
+                else if (_itimediff(current_, segment.resendts) >= 0) //已经发送过的segment 这里是超时重传
+                {//因为在缓冲区的包都是没有收到确认的包。而且是按顺序的，所以如果 这个segment在这里已经超时了，那么后面的包都是超时的包了。
                     needsend = true;
                     segment.xmit++;
                     xmit++;
@@ -834,7 +837,8 @@ namespace SGF.Network.KCP
 
 			//在发生快速重传的时候，会将慢启动阈值调整为当前发送窗口的一半，并把拥塞窗口大小调整为kcp.ssthresh + resent，
 			//resent是触发快速重传的丢包的次数，resent的值代表的意思在被弄丢的包后面收到了resent个数的包的ack。这样调整后kcp就进入了拥塞控制状态。
-            // update ssthresh
+			//当网络很拥堵的情况下，导致发送数据出现重传时，这时说明网络中消息太多了，用户应该减少发送的数据，也就是拥塞窗口应该减小。怎么减小呢，在快速重传的情况下，有包丢失了但是有后续的包收到了，说明网络还是通的，这时采取拥塞窗口的退半避让,拥塞窗口减半，拥塞门限减半
+			// update ssthresh
             if (change != 0)
             {
                 var inflight = snd_nxt - snd_una;
@@ -845,6 +849,7 @@ namespace SGF.Network.KCP
                 incr = cwnd * mss;
             }
 
+			//超时重传当，出现超时重传的时候，说明网络很可能死掉了，因为超时重传会出现，原因是有包丢失了，并且该包之后的包也没有收到，这很有可能是网络死了，这时候，拥塞窗口直接变为1，不再发送新的数据，直到丢失的包传输成功。
             if (lost != 0)
             {
                 ssthresh = cwnd / 2;
