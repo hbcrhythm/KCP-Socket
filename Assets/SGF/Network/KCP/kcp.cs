@@ -19,7 +19,7 @@ namespace SGF.Network.KCP
         public const int IKCP_MTU_DEF = 1400;
         public const int IKCP_ACK_FAST = 3;
         public const int IKCP_INTERVAL = 100;
-        public const int IKCP_OVERHEAD = 24;
+        public const int IKCP_OVERHEAD = 24;	//kcp包的包头大小
         public const int IKCP_DEADLINK = 10;
         public const int IKCP_THRESH_INIT = 2;
         public const int IKCP_THRESH_MIN = 2;
@@ -274,6 +274,8 @@ namespace SGF.Network.KCP
 
             if (peekSize > buffer.Length) return -3;
 
+			//fast_recover标识的意思是快速告知对端我又有窗口大小空出来了，因为在Input函数中有可能窗口会满了，
+			//此时发送给对端的是窗口满消息，而在recv过后，因为取走了消息，可用接收窗口又变大了，此时需要快速告知对端可以继续发消息了。
             var fast_recover = false;
             if (rcv_queue.Length >= rcv_wnd) fast_recover = true;
 
@@ -285,11 +287,13 @@ namespace SGF.Network.KCP
                 Array.Copy(seg.data, 0, buffer, n, seg.data.Length);
                 n += seg.data.Length;
                 count++;
+				//0表示最后一个分片
                 if (0 == seg.frg) break;
             }
 
             if (0 < count)
             {
+				//把队列剩下的Segment重新调整索引 
                 rcv_queue = slice<Segment>(rcv_queue, count, rcv_queue.Length);
             }
 
@@ -333,6 +337,7 @@ namespace SGF.Network.KCP
             if (bufferSize < mss)
                 count = 1;
             else
+				//这里的count 这样写是因为要往上取整。
                 count = (int)(bufferSize + mss - 1) / (int)mss;
 
             if (255 < count) return -2;
@@ -352,6 +357,8 @@ namespace SGF.Network.KCP
                 var seg = new Segment(size);
                 Array.Copy(buffer, offset, seg.data, 0, size);
                 offset += size;
+				//frg 是从大到小的， 最后一个是0哦。
+				//这里只实现了消息模式，并没有实现流模式、。
                 seg.frg = (UInt32)(count - i - 1);
                 snd_queue = append<Segment>(snd_queue, seg);
             }
@@ -377,10 +384,12 @@ namespace SGF.Network.KCP
                 if (rx_srtt < 1) rx_srtt = 1;
             }
 
+			//根据 rx_srtt rx_rttval 计算出rx_tro(重传超时时间).
             var rto = (int)(rx_srtt + _imax_(1, 4 * rx_rttval));
             rx_rto = _ibound_(rx_minrto, (UInt32)rto, IKCP_RTO_MAX);
         }
 
+		//更新第一个未确认的包。就是对端还没告诉我们这个包他们收到了。然后我们需要更新 第一个未收到确认的包的字段(send_una)
         void shrink_buf()
         {
             if (snd_buf.Length > 0)
@@ -389,6 +398,7 @@ namespace SGF.Network.KCP
                 snd_una = snd_nxt;
         }
 
+		//收到act包之后需要删除发送换从区中与ack包中的 发送序列号 sn 相同的kcp包。
         void parse_ack(UInt32 sn)
         {
 
@@ -411,6 +421,8 @@ namespace SGF.Network.KCP
             }
         }
 
+		//根据接受到的una 表示对端 希望接收到的下一个kcp包的序号，也就是说对端已经收到了所有小于una的kcp包了。
+		//那么既然对端已经收到所有小于una的包了，那么就需要把发送缓冲区中小于una的包删掉。
         void parse_una(UInt32 una)
         {
             var count = 0;
@@ -425,11 +437,13 @@ namespace SGF.Network.KCP
             if (0 < count) snd_buf = slice<Segment>(snd_buf, count, snd_buf.Length);
         }
 
+		//保存ack
         void ack_push(UInt32 sn, UInt32 ts)
         {
             acklist = append<UInt32>(acklist, new UInt32[2] { sn, ts });
         }
 
+		//获得acklist中的sn和ts 这个这个p因为在外面/2 所以在这里要*2 
         void ack_get(int p, ref UInt32 sn, ref UInt32 ts)
         {
             sn = acklist[p * 2 + 0];
@@ -460,6 +474,7 @@ namespace SGF.Network.KCP
                 }
             }
 
+			//根据repeat 重新调整rev_buf数据
             if (!repeat)
             {
                 if (after_idx == -1)
@@ -469,6 +484,7 @@ namespace SGF.Network.KCP
             }
 
             // move available data from rcv_buf -> rcv_queue
+			//这里是判断接收到的segment.sn是不是等于接收端下一个要接受的序号，是的话那么需要把这个数据从buf移动到queue里面，并且更新rcv_next
             var count = 0;
             foreach (var seg in rcv_buf)
             {
@@ -554,6 +570,7 @@ namespace SGF.Network.KCP
                 }
                 else if (IKCP_CMD_PUSH == cmd)
                 {
+					//判断这个segment的序号是否在接受窗口内。  /* 这里也缺了一些实现。
                     if (_itimediff(sn, rcv_nxt + rcv_wnd) < 0)
                     {
                         ack_push(sn, ts);
@@ -622,6 +639,7 @@ namespace SGF.Network.KCP
             return 0;
         }
 
+		//获得剩余接受窗口大小
         Int32 wnd_unused()
         {
             if (rcv_queue.Length < rcv_wnd)
@@ -645,6 +663,7 @@ namespace SGF.Network.KCP
             seg.wnd = (UInt32)wnd_unused();
             seg.una = rcv_nxt;
 
+			//发送ack
             // flush acknowledges
             var count = acklist.Length / 2;
             var offset = 0;
@@ -652,6 +671,7 @@ namespace SGF.Network.KCP
             {
                 if (offset + IKCP_OVERHEAD > mtu)
                 {
+					//检测如果超过mtu就将小于mtu的包发送出去。
                     output(buffer, offset);
                     //Array.Clear(buffer, 0, offset);
                     offset = 0;
@@ -673,6 +693,7 @@ namespace SGF.Network.KCP
                 {
                     if (_itimediff(current, ts_probe) >= 0)
                     {
+						//探查窗口的时间会逐渐被大，但是不会超过限制
                         if (probe_wait < IKCP_PROBE_INIT)
                             probe_wait = IKCP_PROBE_INIT;
                         probe_wait += probe_wait / 2;
@@ -689,6 +710,7 @@ namespace SGF.Network.KCP
                 probe_wait = 0;
             }
 
+			//发送探查窗口
             // flush window probing commands
             if ((probe & IKCP_ASK_SEND) != 0)
             {
@@ -746,14 +768,14 @@ namespace SGF.Network.KCP
             {
                 var needsend = false;
                 var debug = _itimediff(current_, segment.resendts);
-                if (0 == segment.xmit)
+                if (0 == segment.xmit)	//新的segment
                 {
                     needsend = true;
                     segment.xmit++;
                     segment.rto = rx_rto;
                     segment.resendts = current_ + segment.rto + rtomin;
                 }
-                else if (_itimediff(current_, segment.resendts) >= 0)
+                else if (_itimediff(current_, segment.resendts) >= 0) //已经发送过的segment 这里是重传
                 {
                     needsend = true;
                     segment.xmit++;
@@ -765,7 +787,7 @@ namespace SGF.Network.KCP
                     segment.resendts = current_ + segment.rto;
                     lost = 1;
                 }
-                else if (segment.fastack >= resent)
+                else if (segment.fastack >= resent)	//收到ack时候会计算该分片被累计的跳过次数，如果大于 配置的 出发快速重传的重复ack个数，那么就马上重传
                 {
                     needsend = true;
                     segment.xmit++;
@@ -810,6 +832,8 @@ namespace SGF.Network.KCP
                 offset = 0;
             }
 
+			//在发生快速重传的时候，会将慢启动阈值调整为当前发送窗口的一半，并把拥塞窗口大小调整为kcp.ssthresh + resent，
+			//resent是触发快速重传的丢包的次数，resent的值代表的意思在被弄丢的包后面收到了resent个数的包的ack。这样调整后kcp就进入了拥塞控制状态。
             // update ssthresh
             if (change != 0)
             {

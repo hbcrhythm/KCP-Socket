@@ -57,6 +57,7 @@ namespace Assets.UnityTest.KCPTest
             if (m_Socket != null)
             {
                 m_MsgId++;
+				this.Log (m_Name + "_" + "Message" + m_MsgId);
                 m_Socket.SendTo(m_Name + "_" + "Message" + m_MsgId, m_RemotePoint);
             }
         }

@@ -438,6 +438,7 @@ namespace SGF.Network.KCP
         {
             if (m_Socket != null)
             {
+				this.Log ("handle kcp send " + buff + " size : " + size + " remotepoint " + m_RemotePoint);
                 m_Socket.SendTo(buff, 0, size, SocketFlags.None, m_RemotePoint);
             }   
         }
@@ -488,6 +489,7 @@ namespace SGF.Network.KCP
                 //收到的不是一个正确的KCP包
                 if (ret < 0)
                 {
+					this.Log ("不是正确的kcp 包");
                     if (m_Listener != null)
                     {
                         m_Listener(recvBufferRaw, recvBufferRaw.Length, m_RemotePoint);
